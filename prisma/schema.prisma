@@ -1,0 +1,1178 @@
+// Pastel — PostgreSQL / Prisma schema.
+// Faithful to Development/02-data-model.md, with three build-time corrections vs the illustrative doc:
+//   1. UUID PKs use @default(uuid(7)) — app-generated, time-ordered (same index locality the doc wants
+//      from "uuidv7()"), portable across PG 16/17/18, no custom DB function dependency. Needs prisma >= 5.14.
+//   2. Back-relations the doc omitted are added so the schema validates (Order<->User, Follow<->User,
+//      MediaAsset<->User, StockReservation<->Order).
+//   3. Postgres extensions are declared on the datasource so `prisma migrate` provisions them before the
+//      geo column / GIN indexes need them. Advanced indexes (GIN/GiST/trigram/FTS/partial) + the
+//      derived `listing_search` projection live in prisma/sql/performance.sql (see doc 05).
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_URL")
+  extensions = [postgis, pg_trgm, btree_gin]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. Enums
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UserType {
+  customer
+  seller
+  provider
+}
+
+enum AccountStatus {
+  active
+  restricted
+  banned
+  deleted
+}
+
+enum ListingState {
+  draft
+  pendingApproval
+  published
+  closed
+}
+
+enum StockType {
+  oneItem
+  multipleItems
+  infiniteOneItem
+  infiniteMultipleItems
+}
+
+enum DeliveryMethod {
+  shipping
+  pickup
+  both
+}
+
+enum OrderProcess {
+  instant_purchase
+  default_purchase
+  cart_stock
+  inquiry
+  booking
+}
+
+enum LineItemCode {
+  item
+  shipping_fee
+  pickup_fee
+  shipping_discount
+  sales_tax
+  app_promo_discount
+  provider_commission
+  customer_commission
+}
+
+enum IncludeFor {
+  customer
+  provider
+}
+
+enum StripeAcctStatus {
+  none
+  onboarding
+  restricted
+  enabled
+}
+
+enum RefundMode {
+  full
+  partial
+}
+
+enum RefundResolution {
+  refund
+  release
+  replacement
+}
+
+enum NotificationChannelPriority {
+  low
+  default
+  high
+}
+
+enum ShowStatus {
+  scheduled
+  live
+  ended
+}
+
+enum MediaType {
+  image
+  video
+}
+
+enum OutboxStatus {
+  pending
+  sent
+  failed
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. Identity & Auth
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id                String        @id @default(uuid(7)) @db.Uuid
+  email             String        @unique
+  emailVerified     Boolean       @default(false)
+  pendingEmail      String?
+  passwordHash      String? // null for IdP-only accounts (Argon2id)
+  userType          UserType      @default(customer)
+  accountStatus     AccountStatus @default(active)
+  restrictedAt      DateTime?
+  restrictionReason String?
+
+  // Profile (was Sharetribe profile.*)
+  firstName      String?
+  lastName       String?
+  displayName    String?
+  bio            String?
+  handle         String? @unique // shop/username handle
+  businessName   String?
+  businessType   String?
+  aboutShop      String?
+  profileImageId String? @db.Uuid
+  isTopSeller    Boolean @default(false)
+
+  // Extended buckets (long tail of publicData/privateData/protectedData/metadata)
+  publicData    Json @default("{}")
+  privateData   Json @default("{}")
+  protectedData Json @default("{}")
+  metadata      Json @default("{}")
+
+  // Counts (denormalized; maintained by triggers/services)
+  followersCount Int @default(0)
+  followingCount Int @default(0)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  // relations
+  profileImage      MediaAsset?     @relation("UserProfileImage", fields: [profileImageId], references: [id])
+  listings          Listing[]
+  idpLinks          IdpLink[]
+  permissions       UserPermission?
+  addresses         Address[]
+  stripeAccount     StripeAccount?
+  stripeCustomer    StripeCustomer?
+  collections       Collection[]
+  cart              CartItem[]
+  ordersAsCustomer  Order[]         @relation("OrderCustomer")
+  ordersAsProvider  Order[]         @relation("OrderProvider")
+  followsInitiated  Follow[]        @relation("Follower") // rows where this user is followerId
+  followsReceived   Follow[]        @relation("Following") // rows where this user is followingId
+
+  @@index([handle])
+  @@index([userType, accountStatus])
+  @@index([isTopSeller])
+}
+
+// Replaces Sharetribe effectivePermissionSet (the permissionsLoaded gate, doc 06)
+model UserPermission {
+  userId       String   @id @db.Uuid
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  postListings String   @default("permission/allow") // allow|deny
+  initiateTx   String   @default("permission/allow")
+  read         String   @default("permission/allow")
+  updatedAt    DateTime @updatedAt
+}
+
+model IdpLink {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  userId      String   @db.Uuid
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider    String // google | apple | facebook
+  providerUid String
+  createdAt   DateTime @default(now())
+
+  @@unique([provider, providerUid])
+}
+
+model Credential {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  userId      String    @db.Uuid
+  refreshHash String // hashed rotating refresh token
+  scope       String    @default("user") // user | trusted
+  family      String?   @db.Uuid // token-family id for reuse-detection revocation
+  userAgent   String?
+  ip          String?
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId])
+  @@index([family])
+}
+
+model EmailToken {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  userId    String?   @db.Uuid
+  email     String
+  kind      String // verify_email | reset_password | buyer_verification
+  tokenHash String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([email, kind])
+}
+
+model Address {
+  id         String  @id @default(uuid(7)) @db.Uuid
+  userId     String  @db.Uuid
+  user       User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label      String?
+  recipient  String?
+  street1    String
+  street2    String?
+  city       String
+  state      String?
+  postalCode String?
+  country    String
+  isDefault  Boolean @default(false)
+
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. Catalog
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Category {
+  id        String     @id // stable slug, e.g. "ceramic"
+  name      String
+  parentId  String?
+  parent    Category?  @relation("CatTree", fields: [parentId], references: [id])
+  children  Category[] @relation("CatTree")
+  level     Int // 1..3
+  path      String // ltree-style "ceramic.porcelain.plate"
+  sortOrder Int        @default(0)
+  active    Boolean    @default(true)
+
+  @@index([parentId])
+  @@index([path])
+}
+
+model Listing {
+  id          String       @id @default(uuid(7)) @db.Uuid
+  authorId    String       @db.Uuid
+  author      User         @relation(fields: [authorId], references: [id])
+  title       String       @default("Draft")
+  description String?
+  state       ListingState @default(draft)
+
+  // Money
+  priceAmount         BigInt? // minor units
+  priceCurrency       String? @db.Char(3)
+  originalPriceAmount BigInt?
+  costAmount          BigInt?
+
+  // Type / process
+  listingType  String @default("instant-purchase")
+  processAlias String @default("instant-purchase/release-14")
+  unitType     String @default("item")
+
+  // Categories (denormalized ancestors → equality-indexable filters)
+  categoryL1    String?
+  categoryL2    String?
+  categoryL3    String?
+  otherCategory String?
+
+  // Stock
+  stockType     StockType @default(multipleItems)
+  stockQuantity Int       @default(0)
+  stockVersion  Int       @default(0) // optimistic lock (replaces compareAndSet)
+
+  // Delivery / shipping
+  deliveryMethod     DeliveryMethod @default(shipping)
+  shippingEnabled    Boolean        @default(true)
+  pickupEnabled      Boolean        @default(false)
+  freeShipping       Boolean        @default(false)
+  shippingType       String? // fixed | custom
+  shipOneItemAmount  BigInt?
+  shipAddlItemAmount BigInt?
+
+  // Geo (PostGIS) — optional; geo search dormant today but supported
+  geo Unsupported("geography(Point,4326)")?
+
+  // Provenance / descriptive (filterable subset promoted)
+  condition     String?
+  period        String?
+  origin        String?
+  materials     String[] // text[]; multi-enum has_all/has_any via GIN (performance.sql)
+  certification String?
+
+  // The long tail
+  publicData  Json @default("{}")
+  privateData Json @default("{}")
+  metadata    Json @default("{}")
+
+  // AI generation
+  aiGeneratedData Json?
+  aiDataGenerated Boolean @default(false)
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  publishedAt DateTime?
+  deletedAt   DateTime?
+
+  images      ListingImage[]
+  media       ListingMedia[]
+  variants    ListingVariant[]
+  reviews     Review[]
+  stats       ListingStats?
+  collections CollectionListing[]
+
+  @@index([authorId, state])
+  @@index([authorId, deletedAt, createdAt]) // seller dashboard: own listings, newest-first (AUDIT M4)
+  @@index([state, createdAt])
+  @@index([state, priceAmount])
+  @@index([categoryL1, categoryL2, categoryL3])
+  @@index([listingType])
+  // GIN(materials), GIN(fts), GiST(geo), trigram(title) → prisma/sql/performance.sql
+}
+
+model ListingImage {
+  id        String  @id @default(uuid(7)) @db.Uuid
+  listingId String  @db.Uuid
+  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  assetId   String  @db.Uuid // → MediaAsset
+  position  Int     @default(0)
+
+  @@index([listingId, position])
+}
+
+model ListingMedia {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  listingId    String    @db.Uuid
+  listing      Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  type         MediaType
+  url          String
+  thumbnailUrl String?
+  position     Int       @default(0)
+}
+
+model ListingVariant {
+  id               String  @id @default(uuid(7)) @db.Uuid
+  listingId        String  @db.Uuid
+  listing          Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  sku              String?
+  optionName       String?
+  optionValue      String?
+  priceDeltaAmount BigInt  @default(0)
+  stockQuantity    Int     @default(0)
+  stockVersion     Int     @default(0)
+}
+
+model ListingStats {
+  listingId     String   @id @db.Uuid
+  listing       Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  viewCount     BigInt   @default(0)
+  favoriteCount BigInt   @default(0)
+  ratingAvg     Float    @default(0)
+  reviewCount   Int      @default(0)
+  updatedAt     DateTime @updatedAt
+}
+
+model Collection {
+  id          String              @id @default(uuid(7)) @db.Uuid
+  ownerId     String              @db.Uuid
+  owner       User                @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  createdAt   DateTime            @default(now())
+  listings    CollectionListing[]
+
+  @@index([ownerId])
+}
+
+model CollectionListing {
+  collectionId String     @db.Uuid
+  listingId    String     @db.Uuid
+  position     Int        @default(0)
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  listing      Listing    @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@id([collectionId, listingId])
+}
+
+// Live-show product catalog (legacy Firestore `products`). DECISION PENDING (doc 09 §5.1): fold into
+// Listing (preferred) or keep this lightweight entity. Modeled to unblock; revisit in Phase 0/1.
+model Product {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  sellerId    String   @db.Uuid // owner (immutable after create)
+  title       String
+  description String?
+  price       BigInt // minor units
+  quantity    Int?
+  images      String[]
+  status      String   @default("active") // active | inactive
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([sellerId, status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. Orders (the transaction engine)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ProcessDef {
+  alias      String       @id // "instant-purchase/release-14"
+  name       OrderProcess
+  definition Json // states[], transitions[], timers[], actor rules
+  active     Boolean      @default(true)
+}
+
+model Order {
+  id                 String       @id @default(uuid(7)) @db.Uuid
+  processAlias       String
+  processName        OrderProcess
+  state              String // current state name (e.g. "purchased")
+  lastTransition     String?
+  lastTransitionedAt DateTime?
+
+  customerId    String  @db.Uuid
+  providerId    String  @db.Uuid
+  listingId     String? @db.Uuid // null for pure cart-parent
+  parentOrderId String? @db.Uuid // child/parent (cart) relationship
+  customer      User    @relation("OrderCustomer", fields: [customerId], references: [id])
+  provider      User    @relation("OrderProvider", fields: [providerId], references: [id])
+
+  // Money snapshots (derived from line items, persisted for fast reads)
+  payinTotalAmount  BigInt @default(0)
+  payoutTotalAmount BigInt @default(0)
+  currency          String @db.Char(3)
+
+  // Buyer/shipping context (was protectedData)
+  shippingAddress  Json?
+  cartSnapshot     Json?
+  salesTaxSnapshot Json?
+  protectedData    Json  @default("{}")
+  metadata         Json  @default("{}")
+
+  // Payout/escrow tracking — the irreversibility boundary (doc 04)
+  payoutReleased   Boolean   @default(false)
+  payoutReleasedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lineItems     LineItem[]
+  transitions   OrderTransition[]
+  reservations  StockReservation[]
+  messages      Message[]
+  reviews       Review[]
+  scheduled     ScheduledTransition[]
+  paymentIntent PaymentIntent?
+  payout        Payout?
+  refunds       Refund[]
+
+  @@index([customerId, state])
+  @@index([providerId, state])
+  @@index([listingId])
+  @@index([state, lastTransitionedAt])
+  @@index([parentOrderId])
+}
+
+model OrderTransition {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  orderId     String   @db.Uuid
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  transition  String
+  fromState   String?
+  toState     String
+  actor       String // customer | provider | operator | system
+  actorUserId String?  @db.Uuid
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now())
+
+  @@index([orderId, createdAt])
+}
+
+model LineItem {
+  id              String       @id @default(uuid(7)) @db.Uuid
+  orderId         String       @db.Uuid
+  order           Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  code            LineItemCode
+  unitPriceAmount BigInt
+  currency        String       @db.Char(3)
+  quantity        Int          @default(1)
+  percentage      Decimal?     @db.Decimal(9, 4) // for commission lines
+  lineTotalAmount BigInt
+  includeFor      IncludeFor[]
+  reversal        Boolean      @default(false) // refund reversal line
+
+  @@index([orderId])
+}
+
+model StockReservation {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  orderId   String?  @db.Uuid
+  order     Order?   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  listingId String   @db.Uuid
+  variantId String?  @db.Uuid
+  quantity  Int
+  state     String // pending | confirmed | expired | canceled
+  expiresAt DateTime // 15-minute hold
+  createdAt DateTime @default(now())
+
+  @@index([listingId, state])
+  @@index([expiresAt, state])
+}
+
+model ScheduledTransition {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  orderId    String   @db.Uuid
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  transition String
+  guardState String // only fire if order still in this state
+  runAt      DateTime
+  status     String   @default("pending") // pending | fired | skipped | canceled
+  attempts   Int      @default(0)
+
+  @@index([status, runAt])
+}
+
+model CartItem {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listingId String   @db.Uuid
+  variant   String?
+  size      String?
+  quantity  Int      @default(1)
+  addedAt   DateTime @default(now())
+
+  @@unique([userId, listingId, variant, size])
+}
+
+model Message {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  orderId   String   @db.Uuid
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  senderId  String   @db.Uuid
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([orderId, createdAt])
+}
+
+model Review {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  orderId   String   @db.Uuid
+  listingId String?  @db.Uuid
+  authorId  String   @db.Uuid
+  subjectId String   @db.Uuid // user being reviewed
+  type      String // ofProvider | ofCustomer
+  rating    Int // 1..5
+  content   String?
+  state     String   @default("public") // public | pending
+  createdAt DateTime @default(now())
+  order     Order    @relation(fields: [orderId], references: [id])
+  listing   Listing? @relation(fields: [listingId], references: [id])
+
+  @@index([subjectId, state])
+  @@index([listingId, state, createdAt]) // listing-detail reviews, newest-first (AUDIT M5)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. Payments (Stripe Connect)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model StripeAccount {
+  id              String           @id @default(uuid(7)) @db.Uuid
+  userId          String           @unique @db.Uuid
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stripeAccountId String           @unique
+  country         String?
+  status          StripeAcctStatus @default(none)
+  chargesEnabled  Boolean          @default(false)
+  payoutsEnabled  Boolean          @default(false)
+  requirementsDue Json?
+  externalLast4   String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+}
+
+model StripeCustomer {
+  id                     String          @id @default(uuid(7)) @db.Uuid
+  userId                 String          @unique @db.Uuid
+  user                   User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stripeCustomerId       String          @unique
+  defaultPaymentMethodId String?
+  paymentMethods         PaymentMethod[]
+}
+
+model PaymentMethod {
+  id         String         @id @default(uuid(7)) @db.Uuid
+  customerId String         @db.Uuid
+  customer   StripeCustomer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  stripePmId String         @unique
+  brand      String?
+  last4      String?
+  expMonth   Int?
+  expYear    Int?
+  createdAt  DateTime       @default(now())
+}
+
+model PaymentIntent {
+  id                   String    @id @default(uuid(7)) @db.Uuid
+  orderId              String    @unique @db.Uuid
+  order                Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  stripePiId           String    @unique
+  clientSecret         String?
+  amount               BigInt
+  currency             String    @db.Char(3)
+  applicationFeeAmount BigInt? // = payin - payout (platform margin)
+  status               String
+  capturedAt           DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+}
+
+model Payout {
+  id                   String    @id @default(uuid(7)) @db.Uuid
+  orderId              String    @unique @db.Uuid
+  order                Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  stripeTransferId     String?   @unique
+  destinationAccountId String
+  amount               BigInt
+  currency             String    @db.Char(3)
+  status               String // pending | paid | failed | reversed
+  releasedAt           DateTime?
+  createdAt            DateTime  @default(now())
+}
+
+model Refund {
+  id             String           @id @default(uuid(7)) @db.Uuid
+  orderId        String           @db.Uuid
+  order          Order            @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  stripeRefundId String?          @unique
+  mode           RefundMode
+  resolution     RefundResolution
+  amount         BigInt
+  currency       String           @db.Char(3)
+  reason         String?
+  note           String?
+  actor          String?
+  createdAt      DateTime         @default(now())
+
+  @@index([orderId])
+}
+
+model StripeEvent {
+  id          String    @id // Stripe event id (evt_...)
+  type        String
+  payload     Json
+  processedAt DateTime?
+  createdAt   DateTime  @default(now())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. Tax & Shipping
+// ─────────────────────────────────────────────────────────────────────────────
+
+model TaxOrder {
+  id         String    @id // pastel-{orderId}
+  orderId    String    @unique @db.Uuid
+  amount     BigInt
+  shipping   BigInt
+  salesTax   BigInt
+  toState    String?
+  reportedAt DateTime?
+  raw        Json
+}
+
+model TaxRefund {
+  id         String    @id // pastel-refund-{orderId}-{suffix}
+  orderId    String    @db.Uuid
+  amount     BigInt
+  salesTax   BigInt
+  reportedAt DateTime?
+  raw        Json
+
+  @@index([orderId])
+}
+
+model Shipment {
+  id           String          @id @default(uuid(7)) @db.Uuid
+  orderId      String          @db.Uuid
+  carrier      String?
+  service      String?
+  shippoRateId String?
+  shippoTxId   String?
+  labelUrl     String?
+  rateAmount   BigInt?
+  currency     String?         @db.Char(3)
+  createdAt    DateTime        @default(now())
+  tracking     TrackingEntry[]
+
+  @@index([orderId])
+}
+
+model TrackingEntry {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  orderId      String    @db.Uuid
+  shipmentId   String?   @db.Uuid
+  shipment     Shipment? @relation(fields: [shipmentId], references: [id])
+  trackingId   String
+  trackingLink String?
+  updatedById  String?   @db.Uuid
+  updatedAt    DateTime  @updatedAt
+
+  @@index([orderId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. Social
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Follow {
+  followerId  String   @db.Uuid
+  followingId String   @db.Uuid
+  source      String?
+  status      String   @default("active")
+  createdAt   DateTime @default(now())
+  follower    User     @relation("Follower", fields: [followerId], references: [id], onDelete: Cascade)
+  following   User     @relation("Following", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@id([followerId, followingId])
+  @@index([followingId, status])
+  @@index([followerId, status])
+}
+
+model Favorite {
+  userId    String   @db.Uuid
+  listingId String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  @@id([userId, listingId])
+  @@index([listingId])
+}
+
+model Story {
+  id                String    @id @default(uuid(7)) @db.Uuid
+  userId            String    @db.Uuid
+  listingId         String?   @db.Uuid
+  storyType         String // public | highlight
+  mediaType         MediaType
+  mediaUrl          String
+  thumbnailUrl      String?
+  description       String?
+  likeCount         Int       @default(0)
+  showOnProductPage Boolean   @default(false)
+  createdAt         DateTime  @default(now())
+  expiresAt         DateTime? // 24h for public stories
+
+  @@index([userId, createdAt])
+  @@index([listingId])
+  @@index([expiresAt])
+}
+
+model StoryLike {
+  storyId   String   @db.Uuid
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  @@id([storyId, userId])
+}
+
+model Highlight {
+  id           String           @id @default(uuid(7)) @db.Uuid
+  userId       String           @db.Uuid
+  name         String
+  coverStoryId String?          @db.Uuid
+  createdAt    DateTime         @default(now())
+  stories      HighlightStory[]
+
+  @@index([userId])
+}
+
+model HighlightStory {
+  highlightId String    @db.Uuid
+  storyId     String    @db.Uuid
+  position    Int       @default(0)
+  highlight   Highlight @relation(fields: [highlightId], references: [id], onDelete: Cascade)
+
+  @@id([highlightId, storyId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. Notifications
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Notification {
+  id             String    @id @default(uuid(7)) @db.Uuid
+  recipientId    String    @db.Uuid
+  type           String
+  recipientMode  String? // buyer | seller
+  actorId        String?   @db.Uuid
+  actorName      String?
+  actorImage     String?
+  listingId      String?   @db.Uuid
+  listingTitle   String?
+  orderId        String?   @db.Uuid
+  showId         String?   @db.Uuid
+  storyId        String?   @db.Uuid
+  messagePreview String?
+  scheduledKey   String? // deterministic dedup key e.g. "upcoming_live_{showId}_{recipientId}"
+  sendAt         DateTime? // future-visible time for scheduled in-app notifications
+  read           Boolean   @default(false)
+  readAt         DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@unique([scheduledKey])
+  @@index([recipientId, createdAt])
+  @@index([recipientId, read])
+  @@index([type, showId])
+  @@index([sendAt])
+  // PARTIAL UNIQUE(recipientId, orderId, type) WHERE orderId IS NOT NULL → performance.sql
+}
+
+model NotificationPreference {
+  userId     String   @id @db.Uuid
+  priorities Json     @default("{}") // {type -> low|default|high}
+  enabled    Json     @default("{}") // {buyer|seller -> {type -> bool}}
+  updatedAt  DateTime @updatedAt
+}
+
+model PushToken {
+  id            String   @id @default(uuid(7)) @db.Uuid
+  userId        String   @db.Uuid
+  token         String // FCM token
+  platform      String? // ios | android | web
+  appVersion    String?
+  bundleVersion String?
+  revoked       Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([userId, token])
+  @@index([userId, revoked])
+}
+
+model OrderEmailReminder {
+  id            String   @id // {orderId}_{reminderType}
+  orderId       String   @db.Uuid
+  reminderType  String
+  recipientId   String   @db.Uuid
+  recipientMode String?
+  sendAt        DateTime
+  sent          Boolean  @default(false)
+  canceled      Boolean  @default(false)
+
+  @@index([sent, canceled, sendAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. Live shows, Promotions, Config/CMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Show {
+  id                   String        @id // orchestrator show id (= LiveKit room)
+  creatorId            String        @db.Uuid
+  title                String?
+  status               ShowStatus    @default(scheduled)
+  scheduledAt          DateTime?
+  startedAt            DateTime?
+  endedAt              DateTime?
+  connectionState      String? // connected | reconnecting | ended
+  sellerDisconnectedAt DateTime?
+  graceEndsAt          DateTime?
+  currentSessionId     String?
+  sessionCount         Int           @default(0)
+  totalDuration        Int           @default(0)
+  endReason            String? // manual | grace_expired | webhook
+  lastSellerEventAt    DateTime?
+  pinnedProductId      String?       @db.Uuid
+  productIds           String[]      @db.Uuid
+  createdAt            DateTime      @default(now())
+  sessions             ShowSession[]
+
+  @@index([status, graceEndsAt])
+  @@index([creatorId, status])
+}
+
+model ShowSession {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  showId    String
+  show      Show      @relation(fields: [showId], references: [id], onDelete: Cascade)
+  sessionId String // generated string "session-{ts}-{rand}" (NOT a UUID)
+  startedAt DateTime
+  endedAt   DateTime?
+  duration  Int?
+  status    String    @default("active") // active | completed
+
+  @@unique([showId, sessionId])
+  @@index([showId])
+}
+
+model Discount {
+  id             String          @id @default(uuid(7)) @db.Uuid
+  code           String          @unique
+  isActive       Boolean         @default(true)
+  percentage     Decimal         @db.Decimal(5, 2)
+  remainingUsage Int?
+  showOn         String[]
+  applyOn        String[]
+  title          String?
+  expiresAt      DateTime?
+  usages         DiscountUsage[]
+}
+
+model DiscountUsage {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  discountId String   @db.Uuid
+  discount   Discount @relation(fields: [discountId], references: [id], onDelete: Cascade)
+  userId     String   @db.Uuid
+  orderId    String?  @db.Uuid
+  usedAt     DateTime @default(now())
+
+  @@unique([userId, discountId])
+}
+
+model ShopPromotion {
+  id              String               @id @default(uuid(7)) @db.Uuid
+  sellerId        String               @db.Uuid
+  name            String
+  code            String
+  discountPercent Decimal              @db.Decimal(5, 2)
+  isActive        Boolean              @default(true)
+  usageLimit      Int?
+  usageCount      Int                  @default(0)
+  revenue         BigInt               @default(0)
+  discountGiven   BigInt               @default(0)
+  shares          Int                  @default(0)
+  expiresAt       DateTime?
+  deletedAt       DateTime?
+  usages          ShopPromotionUsage[]
+
+  @@unique([sellerId, code])
+  @@index([sellerId, isActive])
+}
+
+model ShopPromotionUsage {
+  id          String        @id @default(uuid(7)) @db.Uuid
+  promotionId String        @db.Uuid
+  promotion   ShopPromotion @relation(fields: [promotionId], references: [id], onDelete: Cascade)
+  userId      String        @db.Uuid
+  orderId     String?       @db.Uuid
+  usedAt      DateTime      @default(now())
+
+  @@unique([userId, promotionId])
+}
+
+model CommissionConfig {
+  id                 Int      @id @default(1)
+  providerPercentage Decimal  @db.Decimal(5, 2)
+  customerPercentage Decimal  @db.Decimal(5, 2)
+  updatedAt          DateTime @updatedAt
+}
+
+model ConfigAsset {
+  key       String   @id // "listings/listing-fields", "design/branding"
+  version   String
+  data      Json
+  updatedAt DateTime @updatedAt
+}
+
+model CmsPage {
+  slug        String    @id
+  data        Json
+  publishedAt DateTime?
+  updatedAt   DateTime  @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 11. Media, Admin/Ops, Platform
+// ─────────────────────────────────────────────────────────────────────────────
+
+model MediaAsset {
+  id          String   @id @default(uuid(7)) @db.Uuid
+  ownerId     String?  @db.Uuid
+  kind        String // listing-image | profile-image | story | appeal
+  storageKey  String
+  contentType String?
+  width       Int?
+  height      Int?
+  createdAt   DateTime @default(now())
+
+  profileImageUsers User[] @relation("UserProfileImage")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  actor      String
+  action     String
+  entityType String
+  entityId   String?
+  detail     Json     @default("{}")
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+model RestrictionAppeal {
+  id                String    @id @default(uuid(7)) @db.Uuid
+  userId            String    @db.Uuid
+  email             String?
+  subject           String?
+  description       String?
+  attachmentUrl     String?
+  userType          String?
+  restrictionReason String?
+  status            String    @default("pending")
+  adminNote         String?
+  adminActor        String?
+  reviewedAt        DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([status, createdAt]) // appeals queue (AUDIT M3)
+}
+
+model UserRestriction {
+  id                   String   @id @default(uuid(7)) @db.Uuid
+  userId               String   @db.Uuid
+  action               String
+  reason               String
+  userType             String   @default("customer")
+  closedListings       Int?
+  revokedWaitlistCount Int?
+  adminNote            String?
+  adminActor           String
+  createdAt            DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model ContentReport {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  contentType    String
+  contentId      String
+  reason         String
+  isDmca         Boolean  @default(false)
+  details        String?
+  reporterEmail  String?
+  reporterUserId String?  @db.Uuid
+  status         String   @default("open")
+  createdAt      DateTime @default(now())
+
+  @@index([status, createdAt]) // moderation queue (AUDIT M3)
+  @@index([isDmca, status])
+}
+
+model AccountDeletionRequest {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  userId      String?   @db.Uuid
+  email       String
+  userType    String?
+  status      String    @default("pending") // pending | completed
+  resolution  String?
+  requestedAt DateTime  @default(now())
+  completedAt DateTime?
+
+  @@index([status, requestedAt]) // deletion-request admin queue (AUDIT M3)
+}
+
+model Waitlist {
+  id            String   @id @default(uuid(7)) @db.Uuid
+  email         String   @unique
+  name          String?
+  phone         String?
+  role          String?
+  status        String   @default("pending_verification")
+  priority      Int      @default(0)
+  referralToken String?  @unique
+  referredById  String?  @db.Uuid
+  referralCount Int      @default(0)
+  userId        String?  @db.Uuid
+  createdAt     DateTime @default(now())
+
+  @@index([status, createdAt]) // waitlist admin queue (AUDIT M3)
+}
+
+model AnalyticsDaily {
+  day                String @id // YYYY-MM-DD
+  pageViews          BigInt @default(0)
+  uniqueSessions     BigInt @default(0)
+  signups            BigInt @default(0)
+  emailVerifications BigInt @default(0)
+  cartAdds           BigInt @default(0)
+  checkoutStarts     BigInt @default(0)
+  paymentStepViews   BigInt @default(0)
+  reviewStepViews    BigInt @default(0)
+  checkoutCompletes  BigInt @default(0)
+  shopVisits         Json   @default("{}")
+  referrals          Json   @default("{}")
+}
+
+model Outbox {
+  id        String       @id @default(uuid(7)) @db.Uuid
+  topic     String
+  payload   Json
+  status    OutboxStatus @default(pending)
+  attempts  Int          @default(0)
+  createdAt DateTime     @default(now())
+  sentAt    DateTime?
+
+  @@index([status, createdAt])
+}
+
+model IdempotencyKey {
+  key        String   @id
+  scope      String
+  response   Json?
+  statusCode Int?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+model NativeLog {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  level     String   @default("info")
+  event     String   @default("unknown")
+  data      Json     @default("{}")
+  ua        String?
+  origin    String?
+  createdAt DateTime @default(now())
+  expiresAt DateTime // createdAt + 7d; needs a sweep job
+
+  @@index([createdAt])
+}
+
+model DeviceBundle {
+  deviceId      String   @id // client-generated, sanitized [A-Za-z0-9_-], >=8 chars
+  bundleVersion String   @default("unknown")
+  bundleLabel   String   @default("")
+  release       String   @default("")
+  committedAt   String   @default("") // string, NOT a timestamp
+  platform      String
+  appVersion    String   @default("")
+  buildNumber   String   @default("")
+  userId        String?  @db.Uuid
+  firstSeenAt   DateTime @default(now())
+  lastSeenAt    DateTime @updatedAt
+
+  @@index([bundleVersion])
+  @@index([userId])
+}
