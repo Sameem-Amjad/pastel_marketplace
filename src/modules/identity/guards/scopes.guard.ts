@@ -1,6 +1,6 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { AuthenticatedRequest, Scope } from '../auth.types';
+import { AuthenticatedRequest, Scope } from '../entities/auth.types';
 import { SCOPES_KEY } from '../decorators/scopes.decorator';
 
 /**

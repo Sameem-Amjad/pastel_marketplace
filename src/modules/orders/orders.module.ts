@@ -2,14 +2,14 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppConfig } from '../../config/configuration';
 import { PricingModule } from '../pricing/pricing.module';
-import { CheckoutController } from './checkout.controller';
-import { CheckoutService } from './checkout.service';
+import { CheckoutController } from './controllers/checkout.controller';
+import { CheckoutService } from './services/checkout.service';
 import { FakePaymentGateway } from './gateway/fake-payment-gateway';
 import { PAYMENT_GATEWAY } from './gateway/payment-gateway.interface';
 import { StripePaymentGateway } from './gateway/stripe-payment-gateway';
-import { OrderStateMachine } from './order-state-machine.service';
-import { OrdersController } from './orders.controller';
-import { ScheduledTransitionWorker } from './scheduled-transition.worker';
+import { OrderStateMachine } from './services/order-state-machine.service';
+import { OrdersController } from './controllers/orders.controller';
+import { ScheduledTransitionWorker } from './workers/scheduled-transition.worker';
 
 /**
  * Orders / Payments (doc 04). The payment gateway is chosen at boot: real Stripe Connect when

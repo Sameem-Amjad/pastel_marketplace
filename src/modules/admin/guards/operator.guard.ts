@@ -2,7 +2,7 @@ import { CanActivate, ExecutionContext, ForbiddenException, Injectable, Unauthor
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'crypto';
 import { AppConfig } from '../../../config/configuration';
-import { AuthenticatedRequest } from '../../identity/auth.types';
+import { AuthenticatedRequest } from '../../identity/entities/auth.types';
 
 /**
  * Operator (Admin/Ops) gate. Enforces TWO things:

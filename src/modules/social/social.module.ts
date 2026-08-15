@@ -1,13 +1,13 @@
 import { Module } from '@nestjs/common';
-import { FavoriteController } from './favorite.controller';
-import { FavoriteService } from './favorite.service';
-import { FollowController } from './follow.controller';
-import { FollowService } from './follow.service';
-import { HighlightController } from './highlight.controller';
-import { HighlightService } from './highlight.service';
-import { StoryController } from './story.controller';
-import { StoryService } from './story.service';
-import { UserSocialController } from './user-social.controller';
+import { FavoriteController } from './controllers/favorite.controller';
+import { FavoriteService } from './services/favorite.service';
+import { FollowController } from './controllers/follow.controller';
+import { FollowService } from './services/follow.service';
+import { HighlightController } from './controllers/highlight.controller';
+import { HighlightService } from './services/highlight.service';
+import { StoryController } from './controllers/story.controller';
+import { StoryService } from './services/story.service';
+import { UserSocialController } from './controllers/user-social.controller';
 
 /**
  * Social graph & engagement (follows, favorites/wishlist, stories, highlights).

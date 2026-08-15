@@ -1,5 +1,5 @@
 import { createParamDecorator, ExecutionContext } from '@nestjs/common';
-import { AuthenticatedRequest, Principal } from '../auth.types';
+import { AuthenticatedRequest, Principal } from '../entities/auth.types';
 
 /** Inject the resolved Principal into a handler param: `@CurrentUser() principal: Principal`. */
 export const CurrentUser = createParamDecorator(

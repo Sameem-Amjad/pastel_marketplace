@@ -3,12 +3,12 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { JwtModule } from '@nestjs/jwt';
 import { AppConfig } from '../../config/configuration';
-import { AuthController } from './auth.controller';
-import { AuthService } from './auth.service';
+import { AuthController } from './controllers/auth.controller';
+import { AuthService } from './services/auth.service';
 import { AuthGuard } from './guards/auth.guard';
 import { PermissionsGuard } from './guards/permissions.guard';
 import { ScopesGuard } from './guards/scopes.guard';
-import { MeController } from './me.controller';
+import { MeController } from './controllers/me.controller';
 import { PasswordService } from './services/password.service';
 import { TokenService } from './services/token.service';
 

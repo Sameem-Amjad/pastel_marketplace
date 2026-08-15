@@ -5,7 +5,7 @@ import { randomBytes } from 'crypto';
 import { uuidv7 } from 'uuidv7';
 import { AppConfig } from '../../../config/configuration';
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { AccessClaims, Principal, Scope } from '../auth.types';
+import { AccessClaims, Principal, Scope } from '../entities/auth.types';
 import { PasswordService } from './password.service';
 
 export interface TokenPair {

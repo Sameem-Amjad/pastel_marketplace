@@ -1,9 +1,9 @@
 import { Module } from '@nestjs/common';
-import { AdminModerationController } from './admin-moderation.controller';
-import { AdminModerationService } from './admin-moderation.service';
-import { AdminUsersController } from './admin-users.controller';
-import { AdminUsersService } from './admin-users.service';
-import { AuditService } from './audit.service';
+import { AdminModerationController } from './controllers/admin-moderation.controller';
+import { AdminModerationService } from './services/admin-moderation.service';
+import { AdminUsersController } from './controllers/admin-users.controller';
+import { AdminUsersService } from './services/admin-users.service';
+import { AuditService } from './services/audit.service';
 import { OperatorGuard } from './guards/operator.guard';
 
 /**

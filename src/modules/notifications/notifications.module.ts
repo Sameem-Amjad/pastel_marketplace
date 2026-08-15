@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
-import { NotificationService } from './notification.service';
-import { NotificationsController } from './notifications.controller';
-import { PushTokenController } from './push-token.controller';
+import { NotificationService } from './services/notification.service';
+import { NotificationsController } from './controllers/notifications.controller';
+import { PushTokenController } from './controllers/push-token.controller';
 
 /**
  * Notifications (in-app feed, preferences, push-token registry). PrismaService and ReadPrismaService

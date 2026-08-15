@@ -1,8 +1,8 @@
 import { Module } from '@nestjs/common';
-import { CatalogController } from './catalog.controller';
-import { ListingService } from './listing.service';
-import { SearchController } from './search.controller';
-import { SearchService } from './search.service';
+import { CatalogController } from './controllers/catalog.controller';
+import { ListingService } from './services/listing.service';
+import { SearchController } from './controllers/search.controller';
+import { SearchService } from './services/search.service';
 
 /**
  * Catalog & Search (doc 03 CAT-*, doc 05). SearchController is listed first so its literal routes

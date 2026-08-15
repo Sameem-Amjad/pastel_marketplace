@@ -54,6 +54,7 @@ Read in order; each builds on the last.
 | 07 | [`07-migration-and-delivery-plan.md`](./07-migration-and-delivery-plan.md) | Data migration from Sharetribe + Firebase, phased delivery, dual-run/backfill, cutover, rollback, risks, team & estimate. |
 | 08 | [`08-45-day-execution-plan.md`](./08-45-day-execution-plan.md) | The 45–50 day, 3-engineer execution plan for building the new platform (leadership-facing). |
 | 09 | [`09-coverage-matrix.md`](./09-coverage-matrix.md) | **Coverage matrix & readiness sign-off** — proof (via multi-agent audit) that the docs capture 100% of the current system, the gap-closure log, and the open business decisions. **Read this to confirm we're ready to build.** |
+| 10 | [`10-api-response-standard.md`](./10-api-response-standard.md) | **The implemented wire contract** — the `{ status, message, data \| errors }` envelope, per-module response messages, pagination meta, Swagger conventions, `/api/v1` versioning. Supersedes the RFC-7807 error format in doc 06. **Read before adding an endpoint.** |
 
 ---
 

@@ -1,7 +1,7 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable, SetMetadata } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { AuthenticatedRequest } from '../auth.types';
+import { AuthenticatedRequest } from '../entities/auth.types';
 
 /** UserPermission flags (replaces Sharetribe effectivePermissionSet, doc 06 §6). */
 export type PermissionFlag = 'postListings' | 'initiateTx' | 'read';

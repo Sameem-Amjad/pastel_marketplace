@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
 import { AppConfig } from '../../../config/configuration';
 import { parseCookie } from '../../../common/http/cookies.util';
-import { ANONYMOUS, AuthenticatedRequest, Principal } from '../auth.types';
+import { ANONYMOUS, AuthenticatedRequest, Principal } from '../entities/auth.types';
 import { TokenService } from '../services/token.service';
 
 /**

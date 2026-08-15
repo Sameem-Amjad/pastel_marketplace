@@ -164,7 +164,9 @@ GET    /config/*  GET /cms/:slug
 /internal/* (scheduler/sweeper, service-scoped)   GET /healthz /readyz
 ```
 
-Conventions: cursor pagination, `Idempotency-Key` on mutations, RFC-7807 problem+json errors on the new surface (compat envelope only on the legacy adapter routes), per-scope rate limits.
+Conventions: every route is served under `/api/v1` (probes excepted), cursor pagination, `Idempotency-Key` on mutations, the standard response envelope on **both** success and failure — see [10-api-response-standard.md](10-api-response-standard.md) — and per-scope rate limits.
+
+> Superseded: earlier drafts of this doc specified RFC-7807 `application/problem+json` for errors. That was replaced by the single `{ status, message, data|errors }` envelope so the React Native client has exactly one response shape to parse. See doc 10.
 
 ### 5.1 Image variants the media service / CDN must answer to
 

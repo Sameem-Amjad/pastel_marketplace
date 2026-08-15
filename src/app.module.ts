@@ -1,9 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import configuration from './config/configuration';
+import { ResponseInterceptor } from './common/interceptors/response.interceptor';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { CommonModule } from './common/common.module';
 import { HealthModule } from './health/health.module';
@@ -35,6 +36,12 @@ import { AdminModule } from './modules/admin/admin.module';
     NotificationsModule,
     AdminModule,
   ],
-  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // Wraps every successful handler return in the standard envelope. Registered here rather than in
+    // main.ts because it injects Reflector to read @ResponseMessage / @SkipResponseWrapper.
+    // Its counterpart for failures is HttpExceptionFilter, installed in main.ts.
+    { provide: APP_INTERCEPTOR, useClass: ResponseInterceptor },
+  ],
 })
 export class AppModule {}
